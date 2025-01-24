@@ -1,13 +1,11 @@
 from sklearn.model_selection import RepeatedStratifiedKFold
 import os
 import numpy as np
-from transformers import XLMRobertaTokenizer, XLMRobertaForSequenceClassification, Trainer, TrainingArguments, EarlyStoppingCallback
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments, EarlyStoppingCallback
 from sklearn.metrics import f1_score
 from scipy.special import expit
 from datasets import Dataset
 import json
-import torch
-from torch.nn import BCEWithLogitsLoss
 
 # --- Prepare Narrative Labels ---
 def prepare_labels(training_data, all_labels):
@@ -42,9 +40,8 @@ def train_with_repeated_kfold_and_save(texts, labels):
     dataset = Dataset.from_dict({"text": texts, "label": labels.tolist()})
     dataset = dataset.map(tokenize, batched=True)
 
-    rskf = RepeatedStratifiedKFold(n_splits=5, n_repeats=10, random_state=42)
+    rskf = RepeatedStratifiedKFold(n_splits=5, n_repeats=2, random_state=42)  # Adjusted for smaller runs
     labels_flat = labels.argmax(axis=1)
-
     all_f1_scores = []
 
     for fold, (train_idx, val_idx) in enumerate(rskf.split(np.zeros(len(labels)), labels_flat)):
@@ -52,29 +49,25 @@ def train_with_repeated_kfold_and_save(texts, labels):
         train_dataset = dataset.select(train_idx)
         val_dataset = dataset.select(val_idx)
 
-        model = XLMRobertaForSequenceClassification.from_pretrained(
-            "xlm-roberta-base", num_labels=labels.shape[1]
+        model = AutoModelForSequenceClassification.from_pretrained(
+            "neuralmind/bert-base-portuguese-cased", num_labels=labels.shape[1]
         )
 
-        # Define output directories
-        output_dir = f"/content/drive/MyDrive/portuguese_narrative_model/results_fold_{fold}"
-        logging_dir = f"/content/drive/MyDrive/portuguese_narrative_model/logs_fold_{fold}"
-
         training_args = TrainingArguments(
+            output_dir=f"./results_fold_{fold}",
             evaluation_strategy="epoch",
             save_strategy="epoch",
-            output_dir=output_dir,  # Save locally
-            logging_dir=logging_dir,  # Save logs locally
-            per_device_train_batch_size=16,  # Increased batch size
-            per_device_eval_batch_size=16,
-            num_train_epochs=50,
+            logging_dir=f"./logs_fold_{fold}",
+            per_device_train_batch_size=8,
+            per_device_eval_batch_size=8,
+            num_train_epochs=20,  # Adjust epochs
             warmup_steps=500,
             weight_decay=0.01,
-            logging_steps=10,
-            eval_steps=500,
+            logging_steps=50,
             load_best_model_at_end=True,
             metric_for_best_model="f1_macro",
-            learning_rate=3e-5,
+            save_total_limit=1,
+            learning_rate=3e-5,  # Adjusted learning rate for fine-tuning
             lr_scheduler_type="linear",
             fp16=True
         )
@@ -86,12 +79,10 @@ def train_with_repeated_kfold_and_save(texts, labels):
             eval_dataset=val_dataset,
             tokenizer=tokenizer,
             compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=10)]
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=5)],
         )
 
         trainer.train()
-
-        # Compute F1 on validation set
         predictions = trainer.predict(val_dataset)
         logits = predictions.predictions
         probabilities = expit(logits)
@@ -101,22 +92,18 @@ def train_with_repeated_kfold_and_save(texts, labels):
         all_f1_scores.append(f1)
         print(f"F1 Score for fold {fold+1}: {f1}")
 
-        # Save the fold model and tokenizer to Google Drive
-        model.save_pretrained(f"{output_dir}/model_checkpoint_f1_{f1:.4f}")
-        tokenizer.save_pretrained(f"{output_dir}/tokenizer_checkpoint_f1_{f1:.4f}")
-
     mean_f1 = np.mean(all_f1_scores)
-    print(f"\n=== Mean F1 Score (RepeatedStratifiedKFold): {mean_f1} ===")
+    print(f"\n=== Mean F1 Score: {mean_f1} ===")
 
-    # Save final metrics
-    with open("/content/drive/MyDrive/portuguese_narrative_model/final_metrics.json", "w") as f:
-        json.dump({"mean_f1": mean_f1, "fold_f1_scores": all_f1_scores}, f, indent=4)
-
-    # Save the final best model
-    final_output_dir = "/content/drive/MyDrive/portuguese_narrative_model"
+    # Save the final model
+    final_output_dir = "/content/drive/MyDrive/upd_narrative_model"
     model.save_pretrained(final_output_dir)
     tokenizer.save_pretrained(final_output_dir)
-    print(f"Narrative model and tokenizer saved to {final_output_dir}.")
+    print(f"Final model and tokenizer saved to {final_output_dir}.")
+
+    # Save final metrics
+    with open(f"{final_output_dir}/final_metrics.json", "w") as f:
+        json.dump({"mean_f1": mean_f1, "fold_f1_scores": all_f1_scores}, f, indent=4)
 
     return mean_f1
 
@@ -135,7 +122,8 @@ if __name__ == "__main__":
     print("Preparing narrative labels...")
     texts, labels, label_to_idx = prepare_labels(training_data, all_labels)
 
-    tokenizer = XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
+    tokenizer = AutoTokenizer.from_pretrained("neuralmind/bert-base-portuguese-cased")
 
-    print("Training with Repeated Stratified K-Fold and saving the model...")
-    train_with_repeated_kfold_and_save(texts, labels)
+    print("Training model...")
+    mean_f1 = train_with_repeated_kfold_and_save(texts, labels)
+    print(f"Final Mean F1 Score: {mean_f1}")
